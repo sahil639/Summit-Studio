@@ -63,7 +63,7 @@ const S = {
   anim: { camera: 'orbit', lines: 'none', dir: 'up', speed: 1, amp: .6, terrain: 'none', duration: 8, fps: 30, loop: true },
   react: { source: 'off', target: 'brightness', gain: 1, data: '0, .2, .6, 1, .7, .3, .1, .5, .9, .4' },
   path: [],            // camera keys: { t, p:[x,y,z], q:[x,y,z], ease }
-  exp: { scale: 2, transparent: false, res: '1080', vfps: 30, quality: 'high' },
+  exp: { scale: 2, transparent: false, res: '1080', vfps: 30, quality: 'high', bake: 2048, bakeLines: true, solid: true },
   /* post effects: each one is a switch and a few dials */
   fx: {
     points: { on: false, step: 2, size: 2.2, streak: .6, jitter: .15, low: '#16584a', mid: '#33c9a3', high: '#b4875a', surface: false },
@@ -115,7 +115,8 @@ function buildGeometry() {
   }
   geo.setIndex(new THREE.BufferAttribute(index, 1));
   geo.setAttribute('position', attrs.pos = new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('normal', attrs.nor = new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute('normal', attrs.nor =new THREE.BufferAttribute(new Float32Array(N * 3), 3));
   geo.setAttribute('aRidge', attrs.ridge = new THREE.BufferAttribute(new Float32Array(N), 1));
   geo.setAttribute('aMask', attrs.mask = new THREE.BufferAttribute(new Float32Array(N), 1));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), T.extent);
@@ -166,6 +167,7 @@ const U = {
   uBrush: { value: new THREE.Vector4(0, 0, 0, 0) }, uSection: { value: 0 },
   /* effects */
   uPaintOn: { value: 0 }, uBands: { value: 7 }, uSat: { value: 1.15 }, uStroke: { value: 6 }, uStrokeAmt: { value: .6 }, uRamp: { value: 0 }, uBreak: { value: .35 },
+  uBake: { value: 0 },
   uRelOn: { value: 0 }, uRelShade: { value: .8 }, uRelAz: { value: .62 }, uRelHaze: { value: .3 }, uRelLines: { value: .15 },
   uSpotOn: { value: 1 }, uSpot: { value: new THREE.Vector3(0, 0, .28) }, uRelFade: { value: .85 }, uRelPaper: { value: new THREE.Vector3(.93, .93, .92) },
 };
@@ -198,7 +200,7 @@ const frag = /* glsl */`
   float fbm(vec2 p){ float v = 0.0, a = .5; for (int i = 0; i < 4; i++){ v += a * vnoise(p); p *= 2.03; a *= .5; } return v; }
 
   uniform float uPaintOn, uBands, uSat, uStroke, uStrokeAmt, uBreak, uRelOn, uRelShade, uRelAz, uRelHaze, uRelLines, uSpotOn, uRelFade;
-  uniform int uRamp; uniform vec3 uSpot, uRelPaper;
+  uniform int uRamp, uBake; uniform vec3 uSpot, uRelPaper;
   vec3 ramp6(float x, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4, vec3 c5){
     x = clamp(x, 0.0, 1.0) * 5.0;
     return x < 1.0 ? mix(c0, c1, x) : x < 2.0 ? mix(c1, c2, x - 1.0) : x < 3.0 ? mix(c2, c3, x - 2.0) : x < 4.0 ? mix(c3, c4, x - 3.0) : mix(c4, c5, x - 4.0); }
@@ -263,15 +265,23 @@ const frag = /* glsl */`
     /* the surface under them */
     vec3 N = normalize(vN);
     float lam = max(dot(N, uSun), 0.0);
-    vec3 paper = uPaper * (1.0 - uShade + uShade * (.3 + 1.6 * lam));
+    vec3 paper = uBake == 1 ? uPaper : uPaper * (1.0 - uShade + uShade * (.3 + 1.6 * lam));
     float slope = 1.0 - clamp(N.y, 0.0, 1.0);
     vec3 Nm = N;
     vec3 alb = material(vL, t, slope, Nm);
+    /* bake: the material's surface detail as a tangent-space normal map
+       (tangent +x, bitangent +z — the directions u and v run) */
+    if (uBake == 2) {
+      vec3 Tg = normalize(vec3(1.0, 0.0, 0.0) - N * N.x);
+      vec3 Bt = normalize(vec3(0.0, 0.0, 1.0) - N * N.z - Tg * dot(vec3(0.0, 0.0, 1.0), Tg));
+      gl_FragColor = vec4(vec3(dot(Nm, Tg), dot(Nm, Bt), dot(Nm, N)) * .5 + .5, 1.0);
+      return;
+    }
     vec3 V = normalize(cameraPosition - vW), Hh = normalize(uSun + V);
     float lamM = max(dot(Nm, uSun), 0.0);
     float spec = pow(max(dot(Nm, Hh), 0.0), mix(6.0, 60.0, 1.0 - uRough)) * (1.0 - uRough) * .5;
     vec3 lit = alb * (lamM * uSunCol + uAmb * uAmbCol * (.55 + .45 * Nm.y)) + spec * uSunCol;
-    vec3 base = mix(paper, lit, uTex);
+    vec3 base = mix(paper, uBake == 1 ? alb : lit, uTex);
 
     /* effect: painterly posterize — banded colour from height, light and
        slope, broken by strokes that run downhill */
@@ -315,6 +325,7 @@ const frag = /* glsl */`
     }
 
     vec3 col = mix(base, lc, a * uLineA);
+    if (uBake == 1) { gl_FragColor = vec4(col, 1.0); return; }               // bake: the colour, unlit, no air
     float dist = length(cameraPosition - vW);
     float fog = 1.0 - exp(-pow(dist * uFog * .0035, 2.0));
     float haze = uHaze * exp(-max(vW.y, 0.0) * .045) * smoothstep(60.0, 520.0, dist);
@@ -886,6 +897,140 @@ async function saveVideo() {
   toast('Video saved (' + ext.toUpperCase() + ')');
 }
 
+/* ── 3D export ──────────────────────────────────────────────────────────────
+   The land as a mesh for Blender and game engines: GLB with the look baked
+   into textures, glTF / OBJ / STL as bare geometry, and a 16-bit heightmap.
+   Heights carry the vertical exaggeration and the land's transform; units
+   are metres. Textures are baked in UV space — the mesh drawn flat into a
+   square target with the same shader, unlit and without fog. */
+const bakeMat = new THREE.ShaderMaterial({ uniforms: U, fragmentShader: frag, extensions: { derivatives: true }, side: THREE.DoubleSide,
+  vertexShader: vert.replace('gl_Position = projectionMatrix * mvPosition;', 'gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);') });
+function bake(kind, res) {
+  const rt = new THREE.WebGLRenderTarget(res, res);
+  const m = new THREE.Mesh(geo, bakeMat), sc = new THREE.Scene(); m.frustumCulled = false; sc.add(m);
+  const keep = { px: U.uPx.value, a: U.uLineA.value, brush: U.uBrush.value.w };
+  U.uBake.value = kind; U.uPx.value = res / 1024; U.uBrush.value.w = 0;
+  if (kind === 1 && !S.exp.bakeLines) U.uLineA.value = 0;
+  renderer.setClearColor(0x000000, 0);
+  renderer.setRenderTarget(rt); renderer.clear(); renderer.render(sc, cam); renderer.setRenderTarget(null);
+  const buf = new Uint8Array(res * res * 4);
+  renderer.readRenderTargetPixels(rt, 0, 0, res, res, buf);
+  U.uBake.value = 0; U.uPx.value = keep.px; U.uLineA.value = keep.a; U.uBrush.value.w = keep.brush;
+  rt.dispose(); applyLight();
+  /* the target reads bottom row first; the canvas wants the top row first */
+  const cv = document.createElement('canvas'); cv.width = cv.height = res;
+  const g = cv.getContext('2d'), im = g.createImageData(res, res), row = res * 4;
+  for (let y = 0; y < res; y++) im.data.set(buf.subarray(y * row, (y + 1) * row), (res - 1 - y) * row);
+  g.putImageData(im, 0, 0);
+  return cv;
+}
+/* the land as a mesh, in the shape it is shown */
+function landGeometry() {
+  const g = new THREE.BufferGeometry(), n = T.n, N = n * n, ex = S.view.exag;
+  const pos = new Float32Array(N * 3);
+  for (let q = 0; q < N; q++) { pos[q * 3] = attrs.pos.array[q * 3]; pos[q * 3 + 1] = shown[q] * ex; pos[q * 3 + 2] = attrs.pos.array[q * 3 + 2]; }
+  g.setIndex(geo.index.clone());
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', attrs.nor.clone());
+  g.setAttribute('uv', geo.attributes.uv.clone());
+  land.updateMatrixWorld(); g.applyMatrix4(land.matrixWorld);
+  return g;
+}
+/* a closed solid for printing: the surface, walls down to a base, a floor */
+function solidGeometry() {
+  const n = T.n, N = n * n, ex = S.view.exag;
+  let lo = Infinity, hi = -Infinity; for (let q = 0; q < N; q++) { lo = Math.min(lo, shown[q]); hi = Math.max(hi, shown[q]); }
+  const floor = (lo - Math.max(1, (hi - lo) * .06)) * ex;
+  const ring = []; for (let i = 0; i < n - 1; i++) ring.push(i); for (let j = 0; j < n - 1; j++) ring.push(j * n + n - 1);
+  for (let i = n - 1; i > 0; i--) ring.push((n - 1) * n + i); for (let j = n - 1; j > 0; j--) ring.push(j * n);
+  const R = ring.length, pos = new Float32Array((N + R + 1) * 3);
+  for (let q = 0; q < N; q++) { pos[q * 3] = attrs.pos.array[q * 3]; pos[q * 3 + 1] = shown[q] * ex; pos[q * 3 + 2] = attrs.pos.array[q * 3 + 2]; }
+  ring.forEach((q, k) => { const b = (N + k) * 3; pos[b] = pos[q * 3]; pos[b + 1] = floor; pos[b + 2] = pos[q * 3 + 2]; });
+  const c = (N + R) * 3; pos[c] = 0; pos[c + 1] = floor; pos[c + 2] = 0;
+  const idx = [...geo.index.array];
+  for (let k = 0; k < R; k++) {
+    const a = ring[k], b = ring[(k + 1) % R], a2 = N + k, b2 = N + (k + 1) % R;
+    idx.push(a, b, a2, b, b2, a2);                                             // the wall
+    idx.push(a2, b2, N + R);                                                   // the floor, a fan
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setIndex(idx);
+  /* the ring's winding (−z edge first, +x) makes walls face out and the floor down */
+  g.computeVertexNormals();
+  land.updateMatrixWorld(); g.applyMatrix4(land.matrixWorld);
+  return g;
+}
+async function landMesh(textured) {
+  const g = landGeometry();
+  let m;
+  if (textured) {
+    const res = +S.exp.bake;
+    const map = new THREE.CanvasTexture(bake(1, res)); map.colorSpace = THREE.SRGBColorSpace; map.name = 'baseColor';
+    m = new THREE.MeshStandardMaterial({ name: slug(S.name), map, roughness: S.render.rough, metalness: 0, side: THREE.DoubleSide });
+    if (S.fx.paint.on && S.fx.paint.breakup > 0) m.alphaTest = .5;          // the painterly break-up cuts holes
+    if (S.render.mode !== 'contour' && S.render.bump > 0) { m.normalMap = new THREE.CanvasTexture(bake(2, res)); m.normalMap.name = 'normal'; }
+  } else m = new THREE.MeshStandardMaterial({ name: 'terrain', color: 0xbfbfbf, roughness: 1, metalness: 0 });
+  const mesh = new THREE.Mesh(g, m); mesh.name = slug(S.name);
+  return mesh;
+}
+const tick = () => new Promise(r => setTimeout(r, 30));
+async function export3D(kind) {
+  const name = slug(S.name);
+  busy(true, { glb: 'Baking textures · GLB', gltf: 'Writing glTF', obj: 'Writing OBJ', stl: 'Writing STL', height: 'Writing heightmap', tex: 'Baking texture' }[kind]);
+  await tick();
+  try {
+    if (kind === 'glb' || kind === 'gltf') {
+      const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js');
+      const mesh = await landMesh(kind === 'glb'); busyAt(.5); await tick();
+      const out = await new GLTFExporter().parseAsync(mesh, { binary: kind === 'glb' });
+      download(kind === 'glb' ? new Blob([out], { type: 'model/gltf-binary' }) : new Blob([JSON.stringify(out)], { type: 'model/gltf+json' }), name + (kind === 'glb' ? '.glb' : '.gltf'));
+    } else if (kind === 'obj') {
+      const { OBJExporter } = await import('three/addons/exporters/OBJExporter.js');
+      download(new Blob([new OBJExporter().parse(await landMesh(false))], { type: 'text/plain' }), name + '.obj');
+    } else if (kind === 'stl') {
+      const { STLExporter } = await import('three/addons/exporters/STLExporter.js');
+      const mesh = S.exp.solid ? new THREE.Mesh(solidGeometry()) : await landMesh(false);
+      download(new Blob([new STLExporter().parse(mesh, { binary: true })], { type: 'model/stl' }), name + '.stl');
+    } else if (kind === 'height') {
+      const { blob, lo, hi } = await heightPNG();
+      download(blob, `${name}-height-16bit-${lo.toFixed(1)}-${hi.toFixed(1)}m.png`);
+      busy(false); toast(`Heightmap ${T.n} × ${T.n} · black ${lo.toFixed(1)} m → white ${hi.toFixed(1)} m`); return;
+    } else if (kind === 'tex') {
+      /* north up, like the heightmap: the bake's rows turned over */
+      const src = bake(1, +S.exp.bake), cv = document.createElement('canvas'); cv.width = cv.height = src.width;
+      const g = cv.getContext('2d'); g.translate(0, cv.height); g.scale(1, -1); g.drawImage(src, 0, 0);
+      download(await new Promise(r => cv.toBlob(r, 'image/png')), name + '-colour.png');
+    }
+    busy(false); toast('Exported ' + kind.toUpperCase());
+  } catch (e) {
+    console.error(e); busy(false); toast('Export failed — ' + (e.message || e));
+  }
+}
+/* a 16-bit greyscale PNG: browsers only write 8-bit, so it is built by hand
+   (zlib through CompressionStream) */
+const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(b) { let c = 0xffffffff; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+function pngChunk(type, data) {
+  const out = new Uint8Array(12 + data.length), dv = new DataView(out.buffer);
+  dv.setUint32(0, data.length); for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8); dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+  return out;
+}
+async function heightPNG() {
+  const n = T.n; let lo = Infinity, hi = -Infinity;
+  for (let q = 0; q < n * n; q++) { lo = Math.min(lo, shown[q]); hi = Math.max(hi, shown[q]); }
+  const span = hi - lo || 1, rowLen = 1 + n * 2, raw = new Uint8Array(rowLen * n);
+  for (let j = 0; j < n; j++) {                                               // row 0 is the far edge (−z): north up
+    raw[j * rowLen] = 0;
+    for (let i = 0; i < n; i++) { const v = Math.round((shown[j * n + i] - lo) / span * 65535), o = j * rowLen + 1 + i * 2; raw[o] = v >> 8; raw[o + 1] = v & 255; }
+  }
+  const z = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
+  const ihdr = new Uint8Array(13), dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, n); dv.setUint32(4, n); ihdr[8] = 16; ihdr[9] = 0;          // 16-bit greyscale
+  const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk('IHDR', ihdr), pngChunk('IDAT', z), pngChunk('IEND', new Uint8Array(0))];
+  return { blob: new Blob(parts, { type: 'image/png' }), lo: lo * S.view.exag, hi: hi * S.view.exag };
+}
+
 /* ── presets ──────────────────────────────────────────────────────────────── */
 function toPreset() {
   const nullLand = { x: 0, z: 0, h: 1, spread: 1, seed: 0, rot: 0, aniso: 1, warp: 0, spur: 0, spurF: 1, flute: 0, fluteF: 1, parts: [] };
@@ -1172,6 +1317,14 @@ function buildPanel() {
       ${seg('exp.quality', [['draft', 'Draft'], ['high', 'High'], ['max', 'Maximum']], '', 'Quality')}
       ${btn('video', 'Render video', 'go')}
       <p class="ml-note" id="vid-note"></p>
+      <p class="ml-sub">3D model</p>
+      ${seg('exp.bake', [[1024, '1K'], [2048, '2K'], [4096, '4K']], '', 'Texture size')}
+      ${tog('exp.bakeLines', 'Bake the contour lines into the texture')}
+      ${btn('x-glb', 'GLB with textures', 'go')}
+      <div class="ml-btns">${btn('x-gltf', 'glTF')}${btn('x-obj', 'OBJ')}${btn('x-stl', 'STL')}</div>
+      ${tog('exp.solid', 'STL as a closed solid (for printing)')}
+      <div class="ml-btns">${btn('x-height', 'Heightmap 16-bit')}${btn('x-tex', 'Colour texture')}</div>
+      <p class="ml-note">glTF, OBJ and STL are geometry only. Meshes are in metres at the current exaggeration; the point cloud exports as its surface.</p>
       <p class="ml-sub">Preset</p>
       <input class="ml-in" id="pname" value="${S.name}" aria-label="Preset name">
       <div class="ml-btns">${btn('lib-save', 'Save to library')}${btn('json', 'Download .json')}<div class="ml-btn ml-file">Import .json<input type="file" accept="application/json,.json" id="json-file"></div></div>
@@ -1262,6 +1415,8 @@ const ACT = {
   'cp-save': () => saveCheckpoint(),
   'cp-ab': () => abToggle(),
   png: () => savePNG(), video: () => saveVideo(),
+  'x-glb': () => export3D('glb'), 'x-gltf': () => export3D('gltf'), 'x-obj': () => export3D('obj'), 'x-stl': () => export3D('stl'),
+  'x-height': () => export3D('height'), 'x-tex': () => export3D('tex'),
   'lib-save': () => saveToLibrary(),
   json: () => download(new Blob([JSON.stringify(toPreset())], { type: 'application/json' }), slug(S.name) + '.mountain.json'),
   'use-hero': () => useOnSite('hero'), 'use-clear': () => clearSite(),
