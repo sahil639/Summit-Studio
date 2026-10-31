@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Summit Studio</title>
+<link rel="stylesheet" href="/src/mountains-lab.css">
+</head>
+<body>
+
+<canvas id="lab" aria-label="The mountain"></canvas>
+
+<aside class="ml-panel" id="panel" aria-label="Controls"></aside>
+<div class="ml-tools" id="tools" role="toolbar" aria-label="Sculpt tools"></div>
+<div class="ml-time" id="timeline" aria-label="Timeline"></div>
+<div class="ml-hud" id="hud" aria-hidden="true"></div>
+<div class="ml-present" id="present-bar"></div>
+<div class="ml-busy" id="busy" hidden><div><p id="busy-t">Rendering</p><i><b id="busy-bar"></b></i><button type="button" id="busy-x">Cancel</button></div></div>
+<div class="ml-toast" id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
