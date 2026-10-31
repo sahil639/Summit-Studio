@@ -26,7 +26,7 @@
 
    Keys: V navigate · R raise · L lower · S smooth · N noise · C crease ·
    G ridge · F flatten · K valley · M mask · [ ] brush size · Space play ·
-   P presentation · ⌘Z / ⇧⌘Z undo / redo.
+   P fullscreen · T timeline · ⌘Z / ⇧⌘Z undo / redo.
    ═════════════════════════════════════════════════════════════════════════ */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -64,6 +64,12 @@ const S = {
   react: { source: 'off', target: 'brightness', gain: 1, data: '0, .2, .6, 1, .7, .3, .1, .5, .9, .4' },
   path: [],            // camera keys: { t, p:[x,y,z], q:[x,y,z], ease }
   exp: { scale: 2, transparent: false, res: '1080', vfps: 30, quality: 'high' },
+  /* post effects: each one is a switch and a few dials */
+  fx: {
+    points: { on: false, step: 2, size: 2.2, streak: .6, jitter: .15, low: '#16584a', mid: '#33c9a3', high: '#b4875a', surface: false },
+    paint:  { on: false, bands: 7, sat: 1.15, stroke: 6, strokeAmt: .6, ramp: 'vivid', breakup: .35 },
+    relief: { on: false, shade: .8, az: .62, haze: .3, lines: .15, paper: true, spot: true, cx: 0, cz: 0, radius: .28, fade: .85, border: true, title: 'Summit' },
+  },
 };
 
 /* ── the land ───────────────────────────────────────────────────────────── */
@@ -90,7 +96,7 @@ const land = new THREE.Group();
 scene.add(land);
 
 /* geometry: one vertex per sample, rebuilt only when the detail changes */
-let geo, mesh;
+let geo, mesh, pts, ptsGeo;
 const attrs = {};
 function buildGeometry() {
   const n = T.n, N = n * n;
@@ -114,6 +120,12 @@ function buildGeometry() {
   geo.setAttribute('aMask', attrs.mask = new THREE.BufferAttribute(new Float32Array(N), 1));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), T.extent);
   if (mesh) mesh.geometry = geo;
+  /* the point cloud reads the same vertices, without the index */
+  if (ptsGeo) ptsGeo.dispose();
+  ptsGeo = new THREE.BufferGeometry();
+  ptsGeo.setAttribute('position', attrs.pos); ptsGeo.setAttribute('normal', attrs.nor); ptsGeo.setAttribute('aRidge', attrs.ridge);
+  ptsGeo.boundingSphere = geo.boundingSphere;
+  if (pts) pts.geometry = ptsGeo;
   ridgeBuf = new Float32Array(N);
 }
 let ridgeBuf;
@@ -152,6 +164,10 @@ const U = {
   uKeyDir: { value: 0 }, uDraw: { value: 2 }, uScan: { value: -1 }, uScanOn: { value: 0 }, uShift: { value: 0 },
   uPulse: { value: 0 }, uPulseOn: { value: 0 }, uFlick: { value: 0 }, uFlickOn: { value: 0 }, uAmp: { value: .6 }, uBright: { value: 0 },
   uBrush: { value: new THREE.Vector4(0, 0, 0, 0) }, uSection: { value: 0 },
+  /* effects */
+  uPaintOn: { value: 0 }, uBands: { value: 7 }, uSat: { value: 1.15 }, uStroke: { value: 6 }, uStrokeAmt: { value: .6 }, uRamp: { value: 0 }, uBreak: { value: .35 },
+  uRelOn: { value: 0 }, uRelShade: { value: .8 }, uRelAz: { value: .62 }, uRelHaze: { value: .3 }, uRelLines: { value: .15 },
+  uSpotOn: { value: 1 }, uSpot: { value: new THREE.Vector3(0, 0, .28) }, uRelFade: { value: .85 }, uRelPaper: { value: new THREE.Vector3(.93, .93, .92) },
 };
 const vert = /* glsl */`
   attribute float aRidge; attribute float aMask;
@@ -180,6 +196,20 @@ const frag = /* glsl */`
   float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f*f*(3.0-2.0*f);
     return mix(mix(h2(i), h2(i+vec2(1,0)), u.x), mix(h2(i+vec2(0,1)), h2(i+vec2(1,1)), u.x), u.y); }
   float fbm(vec2 p){ float v = 0.0, a = .5; for (int i = 0; i < 4; i++){ v += a * vnoise(p); p *= 2.03; a *= .5; } return v; }
+
+  uniform float uPaintOn, uBands, uSat, uStroke, uStrokeAmt, uBreak, uRelOn, uRelShade, uRelAz, uRelHaze, uRelLines, uSpotOn, uRelFade;
+  uniform int uRamp; uniform vec3 uSpot, uRelPaper;
+  vec3 ramp6(float x, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4, vec3 c5){
+    x = clamp(x, 0.0, 1.0) * 5.0;
+    return x < 1.0 ? mix(c0, c1, x) : x < 2.0 ? mix(c1, c2, x - 1.0) : x < 3.0 ? mix(c2, c3, x - 2.0) : x < 4.0 ? mix(c3, c4, x - 3.0) : mix(c4, c5, x - 4.0); }
+  /* painterly: shadow blues and purples up to sunlit yellows, pink on the tops */
+  vec3 paintRamp(float x){
+    if (uRamp == 1) return ramp6(x, vec3(.10,.11,.30), vec3(.36,.16,.46), vec3(.78,.27,.45), vec3(.96,.52,.32), vec3(.99,.78,.52), vec3(1.,.93,.80));
+    if (uRamp == 2) return ramp6(x, vec3(.17,.20,.12), vec3(.33,.36,.18), vec3(.62,.50,.24), vec3(.72,.38,.22), vec3(.86,.74,.52), vec3(.95,.91,.82));
+    return ramp6(x, vec3(.16,.18,.58), vec3(.50,.32,.80), vec3(.12,.58,.55), vec3(.38,.74,.30), vec3(.86,.86,.24), vec3(.97,.62,.66));
+  }
+  /* shaded relief: valley green, forest, tan, pale rock */
+  vec3 reliefRamp(float x){ return ramp6(x, vec3(.62,.70,.48), vec3(.44,.55,.34), vec3(.28,.38,.24), vec3(.50,.47,.32), vec3(.70,.64,.50), vec3(.88,.86,.80)); }
 
   vec3 material(vec3 L, float t, float slope, inout vec3 N){
     vec2 q = L.xz;
@@ -243,11 +273,52 @@ const frag = /* glsl */`
     vec3 lit = alb * (lamM * uSunCol + uAmb * uAmbCol * (.55 + .45 * Nm.y)) + spec * uSunCol;
     vec3 base = mix(paper, lit, uTex);
 
+    /* effect: painterly posterize — banded colour from height, light and
+       slope, broken by strokes that run downhill */
+    if (uPaintOn > .5) {
+      vec2 q = vL.xz;
+      vec2 dn = normalize(N.xz + vec2(1e-4, 0.0));
+      vec2 sq = vec2(dot(q, vec2(-dn.y, dn.x)), dot(q, dn) * .3) / max(uStroke, .5);
+      float sn = fbm(sq) - .5, bn = fbm(q * .08);
+      float v = t * .55 + lam * .35 + (1.0 - slope) * .1 + sn * uStrokeAmt * .6;
+      float b = floor(clamp(v, 0.0, .999) * uBands) / max(uBands - 1.0, 1.0);
+      vec3 pc = paintRamp(b);
+      pc = mix(vec3(dot(pc, vec3(.299, .587, .114))), pc, uSat);
+      base = pc * (.88 + .24 * vnoise(sq * 3.0));
+      float edge = max(abs(vL.x), abs(vL.z)) / (uExtent * .5);
+      if (uBreak > 0.0 && (edge + (bn - .5) * .5 > 1.0 - uBreak * .5 || t + (bn - .5) * .25 < uBreak * .22)) discard;
+    }
+    /* effect: shaded relief — map hillshade, a coloured region in a pale
+       grey world, soft haze drifting over it */
+    float relief = 0.0;
+    if (uRelOn > .5) {
+      vec2 q = vL.xz;
+      float ra = uRelAz * 6.2832;
+      vec3 Ls = normalize(vec3(cos(ra), 1.0, sin(ra)));
+      float k = 1.0 + uRelShade * 2.5;
+      vec3 Nr = normalize(vec3(N.x * k, N.y, N.z * k));
+      float hs = clamp(dot(Nr, Ls), 0.0, 1.0);
+      float sh = mix(1.0, .22 + 1.05 * hs, uRelShade);
+      vec3 inside = (uPaintOn > .5 ? base : reliefRamp(t)) * sh;
+      vec3 grey = uRelPaper * mix(1.0, .5 + .62 * hs, uRelShade);
+      float m = 1.0;
+      if (uSpotOn > .5) {
+        vec2 c = uSpot.xy * uExtent;
+        float r = uSpot.z * uExtent, wob = (fbm(q * .025 + 11.0) - .5) * r * .9;
+        m = 1.0 - smoothstep(r - 2.0, r + 2.0, length(q - c) + wob);
+      }
+      vec3 rc = mix(mix(inside, grey, uRelFade), inside, m);
+      float cloud = smoothstep(.38, .78, fbm(q * .012 + 3.0));
+      rc = mix(rc, vec3(.86, .89, .86), uRelHaze * cloud * (.4 + .6 * m));
+      base = rc; relief = 1.0;
+      a *= uRelLines;
+    }
+
     vec3 col = mix(base, lc, a * uLineA);
     float dist = length(cameraPosition - vW);
     float fog = 1.0 - exp(-pow(dist * uFog * .0035, 2.0));
     float haze = uHaze * exp(-max(vW.y, 0.0) * .045) * smoothstep(60.0, 520.0, dist);
-    col = mix(col, uFogCol, clamp(fog + haze, 0.0, 1.0));
+    col = mix(col, uFogCol, clamp(fog + haze, 0.0, 1.0) * (1.0 - relief));
 
     col = mix(col, vec3(1.0, .29, .12), vMask * .38 * uShowMask);
     if (uBrush.w > 0.0) {                                                     // the brush, drawn on the land
@@ -266,6 +337,88 @@ mesh = new THREE.Mesh(geo, mat);
 mesh.frustumCulled = false;
 land.add(mesh);
 pushGeometry();
+
+/* effect: point cloud — the grid as dots, coloured by height, stretched
+   into streaks down the steep ground */
+const PU = {
+  uExag: U.uExag, uMaxH: U.uMaxH, uExtent: U.uExtent, uPx: U.uPx, uFog: U.uFog, uFogCol: U.uFogCol, uSun: U.uSun,
+  uCell: { value: T.cell }, uStep: { value: 2 }, uSize: { value: 2.2 }, uStreak: { value: .6 }, uJitter: { value: .15 },
+  uLow: { value: new THREE.Vector3() }, uMid: { value: new THREE.Vector3() }, uHigh: { value: new THREE.Vector3() },
+};
+const ptsMat = new THREE.ShaderMaterial({ uniforms: PU, clipping: true, vertexShader: /* glsl */`
+  attribute float aRidge;
+  uniform float uExag, uMaxH, uExtent, uPx, uCell, uStep, uSize, uStreak, uJitter;
+  uniform vec3 uLow, uMid, uHigh, uSun;
+  varying vec3 vCol; varying float vStretch; varying vec2 vDir; varying float vDist;
+  float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  #include <clipping_planes_pars_vertex>
+  void main(){
+    vec2 g = (position.xz + uExtent * .5) / uCell;
+    float i = floor(g.x + .5), j = floor(g.y + .5);
+    if (mod(i, uStep) > .5 || mod(j, uStep) > .5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+    vec3 p = position; p.y *= uExag;
+    p.xz += (vec2(h2(vec2(i, j)), h2(vec2(j, i) + 7.0)) - .5) * uCell * uStep * uJitter;
+    vec4 w = modelMatrix * vec4(p, 1.0);
+    vec4 mvPosition = viewMatrix * w;
+    #include <clipping_planes_vertex>
+    gl_Position = projectionMatrix * mvPosition;
+    vec3 N = normalize(mat3(modelMatrix) * normal);
+    float t = clamp(position.y / uMaxH, 0.0, 1.0), slope = 1.0 - clamp(N.y, 0.0, 1.0);
+    vec3 c = t < .5 ? mix(uLow, uMid, t * 2.0) : mix(uMid, uHigh, t * 2.0 - 2.0 * .5);
+    c = mix(c, vec3(.82, .92, .52), smoothstep(.25, .8, aRidge) * .5);         // a yellow catch on the ridges
+    vCol = c * (.62 + .48 * max(dot(N, uSun), 0.0)) * (.85 + .3 * h2(vec2(i * .7, j * 1.3)));
+    vStretch = 1.0 + uStreak * smoothstep(.06, .7, slope) * 4.0;
+    vec2 d = (viewMatrix * vec4(N, 0.0)).xy;
+    vDir = length(d) > 1e-4 ? normalize(d) : vec2(0.0, 1.0);
+    float sz = uSize * uPx;
+    if (projectionMatrix[2][3] != 0.0) sz *= clamp(320.0 / -mvPosition.z, .25, 4.0);
+    gl_PointSize = sz * vStretch;
+    vDist = length(cameraPosition - w.xyz);
+  }`, fragmentShader: /* glsl */`
+  uniform float uFog; uniform vec3 uFogCol;
+  varying vec3 vCol; varying float vStretch; varying vec2 vDir; varying float vDist;
+  #include <clipping_planes_pars_fragment>
+  void main(){
+    #include <clipping_planes_fragment>
+    vec2 c = gl_PointCoord * 2.0 - 1.0; c.y = -c.y;
+    float along = dot(c, vDir), across = dot(c, vec2(-vDir.y, vDir.x)) * vStretch;
+    if (along * along + across * across > 1.0) discard;
+    float fog = 1.0 - exp(-pow(vDist * uFog * .0035, 2.0));
+    gl_FragColor = vec4(mix(vCol, uFogCol, fog), 1.0);
+  }` });
+pts = new THREE.Points(ptsGeo, ptsMat);
+pts.frustumCulled = false; pts.visible = false;
+land.add(pts);
+
+/* the print border and title, drawn over the frame (so exports carry it) */
+const ovScene = new THREE.Scene(), ovCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+const ovCv = document.createElement('canvas'), ovTex = new THREE.CanvasTexture(ovCv);
+ovTex.colorSpace = THREE.SRGBColorSpace;
+const ovQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ map: ovTex, transparent: true, depthTest: false, depthWrite: false }));
+ovQuad.position.z = -1; ovScene.add(ovQuad);
+const ovOn = () => S.fx.relief.on && S.fx.relief.border;
+function drawOverlay() {
+  if (!ovOn()) return;
+  const sz = renderer.getDrawingBufferSize(new THREE.Vector2()), w = sz.x, h = sz.y;
+  ovCv.width = w; ovCv.height = h;
+  const g = ovCv.getContext('2d'), m = Math.min(w, h), ins = Math.round(m * .028) + .5;
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = g.fillStyle = S.fx.relief.paper ? 'rgba(28,28,30,.72)' : 'rgba(233,236,242,.7)';
+  g.lineWidth = Math.max(1, m / 1000);
+  g.strokeRect(ins, ins, w - ins * 2, h - ins * 2);
+  const title = (S.fx.relief.title || '').toUpperCase().split('').join(' ');
+  if (title) {
+    g.font = `400 ${Math.round(m * .017)}px "IBM Plex Sans", system-ui, sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    g.fillText(title, w / 2, h - ins - m * .04);
+  }
+  ovTex.needsUpdate = true;
+}
+document.fonts?.ready.then(drawOverlay);
+function draw() {
+  renderer.render(scene, cam);
+  if (ovOn()) { renderer.autoClear = false; renderer.render(ovScene, ovCam); renderer.autoClear = true; }
+}
 
 /* the section cut: a clipping plane through the land, for the profile view */
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
@@ -303,6 +456,7 @@ function applyLight() {
   skyNow = S.render.mode === 'contour' ? [0, 0, 0] : d.sky;
   const fc = L.fogAuto ? (S.render.mode === 'contour' ? [.03, .035, .05] : d.sky) : hexToV(L.fogColour);
   U.uFogCol.value.set(...fc); U.uFog.value = L.fog; U.uHaze.value = L.haze;
+  if (S.fx.relief.on && S.fx.relief.paper) skyNow = [.93, .93, .92];
   renderer.setClearColor(new THREE.Color().setRGB(...skyNow, THREE.SRGBColorSpace), 1);
   return d;
 }
@@ -317,15 +471,27 @@ function applyRender() {
   U.uLineCol.value.set(...(R.colour === 'ink' ? [.93, .94, .96] : R.colour === 'orange' ? [1, .29, .12] : hexToV(R.custom)));
   U.uMat.value = MATERIALS.indexOf(R.material); U.uTexScale.value = R.texScale; U.uRough.value = R.rough; U.uBump.value = R.bump;
   U.uShowMask.value = R.showMask ? 1 : 0;
-  applyLight();
+  applyLight(); applyFx();
+}
+const RAMPS = ['vivid', 'dusk', 'earth'];
+function applyFx() {
+  const { points: P, paint: A, relief: R } = S.fx;
+  pts.visible = P.on; mesh.visible = !P.on || P.surface;
+  PU.uCell.value = T.cell; PU.uStep.value = P.step; PU.uSize.value = P.size; PU.uStreak.value = P.streak; PU.uJitter.value = P.jitter;
+  PU.uLow.value.set(...hexToV(P.low)); PU.uMid.value.set(...hexToV(P.mid)); PU.uHigh.value.set(...hexToV(P.high));
+  U.uPaintOn.value = A.on ? 1 : 0; U.uBands.value = A.bands; U.uSat.value = A.sat; U.uStroke.value = A.stroke; U.uStrokeAmt.value = A.strokeAmt;
+  U.uRamp.value = Math.max(0, RAMPS.indexOf(A.ramp)); U.uBreak.value = A.breakup;
+  U.uRelOn.value = R.on ? 1 : 0; U.uRelShade.value = R.shade; U.uRelAz.value = R.az; U.uRelHaze.value = R.haze; U.uRelLines.value = R.lines;
+  U.uSpotOn.value = R.spot ? 1 : 0; U.uSpot.value.set(R.cx, R.cz, R.radius); U.uRelFade.value = R.fade;
+  drawOverlay();
 }
 function applyView() {
   const V = S.view;
   U.uExag.value = V.exag;
   persp.fov = V.fov; persp.updateProjectionMatrix();
-  mat.clippingPlanes = V.section ? [sectionPlane] : [];
+  mat.clippingPlanes = ptsMat.clippingPlanes = V.section ? [sectionPlane] : [];
   sectionPlane.constant = V.sectionAt;
-  mat.needsUpdate = true;
+  mat.needsUpdate = ptsMat.needsUpdate = true;
   gizmo.enabled = V.gizmo; (gizmo.getHelper ? gizmo.getHelper() : gizmo).visible = V.gizmo;
   if (V.gizmo) gizmo.attach(land); else gizmo.detach();
   gizmo.setMode(V.gizmoMode === 'move' ? 'translate' : 'rotate');
@@ -362,7 +528,7 @@ function resize(w = innerWidth, h = innerHeight, px = Math.min(devicePixelRatio,
   persp.aspect = w / h; persp.updateProjectionMatrix();
   const half = S.view.cam === 'profile' ? T.extent * .32 : T.extent * .62;
   ortho.left = -half * w / h; ortho.right = half * w / h; ortho.top = half; ortho.bottom = -half; ortho.updateProjectionMatrix();
-  drawTrack();
+  drawTrack(); drawOverlay();
 }
 addEventListener('resize', () => { if (!exporting) resize(); });
 
@@ -643,7 +809,7 @@ function frame(now) {
   animateAt(clockT);
   if (geoDirty) { pushGeometry(); geoDirty = false; }
   if (!playing || !S.path.length) controls.update();
-  renderer.render(scene, cam);
+  draw();
   if (playing || scrubbing) drawTrack();
   hud();
 }
@@ -674,7 +840,7 @@ function savePNG() {
   U.uBrush.value.w = 0;
   if (transparent) { U.uTransparent.value = 1; renderer.setClearColor(0x000000, 0); }
   (gizmo.getHelper ? gizmo.getHelper() : gizmo).visible = false;
-  renderer.render(scene, cam);
+  draw();
   canvas.toBlob(b => {
     download(b, slug(S.name) + (transparent ? '-transparent' : '') + '.png');
     U.uTransparent.value = 0; applyLight(); applyView();
@@ -706,7 +872,7 @@ async function saveVideo() {
     const t = i / fps;
     animateAt(t, { force: true });
     if (!S.path.length) controls.update();
-    renderer.render(scene, cam);
+    draw();
     if (track.requestFrame) track.requestFrame();
     busyAt(i / frames);
     await new Promise(r => setTimeout(r, 1000 / fps));
@@ -732,6 +898,7 @@ function toPreset() {
     sculpt: encodeSculpt({ n: T.n, extent: T.extent, data: T.D }),
     view: { ...S.view, camPos: cam.position.toArray(), camTarget: controls.target.toArray() },
     render: { ...S.render }, light: { ...S.light }, anim: { ...S.anim }, path: S.path.map(k => ({ ...k })),
+    fx: JSON.parse(JSON.stringify(S.fx)),
   };
 }
 function fromPreset(P) {
@@ -739,6 +906,7 @@ function fromPreset(P) {
   remember();
   S.name = P.name || S.name; S.start = P.start || 'Custom'; S.seed = P.seed ?? S.seed;
   Object.assign(S.view, P.view || {}); Object.assign(S.render, P.render || {}); Object.assign(S.light, P.light || {}); Object.assign(S.anim, P.anim || {});
+  for (const k in S.fx) Object.assign(S.fx[k], (P.fx || {})[k] || {});
   S.path = (P.path || []).map(k => ({ ...k }));
   if (P.detail && P.detail !== T.n) { T.resize(P.detail); S.detail = P.detail; buildGeometry(); }
   T.landform = clonePeak(P.landform); T.useLandform = !!(P.landform && P.landform.parts && P.landform.parts.length);
@@ -851,6 +1019,7 @@ function tog(path, label, on) {
 }
 const btn = (act, label, cls = '') => `<button type="button" class="ml-btn ${cls}" data-act="${act}">${label}</button>`;
 const sec = (id, title, body, open, sub) => `<details class="ml-sec" id="s-${id}"${open ? ' open' : ''}><summary>${title}${sub ? ` <small>${sub}</small>` : ''}</summary><div class="ml-body">${body}</div></details>`;
+const grp = (id, title, body, open) => `<details class="ml-grp" id="g-${id}"${open ? ' open' : ''}><summary>${title}</summary><div class="ml-body">${body}</div></details>`;
 const f1 = v => v.toFixed(1), f2 = v => v.toFixed(2), pc = v => Math.round(v * 100) + '%', xk = v => '×' + v.toFixed(2);
 
 function buildPanel() {
@@ -900,6 +1069,7 @@ function buildPanel() {
     `)}
     ${sec('render', 'Render', `
       ${seg('render.mode', [['contour', 'Contour'], ['hybrid', 'Hybrid'], ['textured', 'Textured']], 'render', 'Mode')}
+      ${grp('line', 'Line', `
       ${range('render.spacing', 'Line spacing', .3, 6, .05, v => v.toFixed(2) + ' m', 'render')}
       ${range('render.width', 'Line weight', .4, 4, .05, v => v.toFixed(2) + ' px', 'render')}
       ${range('render.indexEvery', 'Index line every', 2, 12, 1, v => v, 'render')}
@@ -909,13 +1079,51 @@ function buildPanel() {
       <div class="ml-col"><input type="color" id="line-col" value="${S.render.custom}"><span class="ml-note">Custom colour</span></div>
       ${range('render.opacity', 'Line opacity', 0, 1, .01, pc, 'render')}
       ${range('render.shade', 'Surface shade under the lines', 0, 1, .01, pc, 'render')}
-      <p class="ml-sub">Texture (hybrid · textured)</p>
+      `, true)}
+      ${grp('material', 'Material', `
+      <p class="ml-note">Applies in Hybrid and Textured modes.</p>
       ${range('render.tex', 'Texture strength', 0, 1, .01, pc, 'render')}
       ${seg('render.material', [['rock', 'Rock'], ['snow', 'Snow'], ['grass', 'Grass'], ['volcanic', 'Volcanic'], ['desert', 'Desert'], ['custom', 'Custom']], 'render', 'Material')}
       <div class="ml-btns"><div class="ml-btn ml-file">Albedo…<input type="file" accept="image/*" id="albedo-file"></div><div class="ml-btn ml-file">Normal map…<input type="file" accept="image/*" id="normal-file"></div></div>
       ${range('render.texScale', 'Texture scale', 8, 160, 1, v => v + ' m', 'render')}
       ${range('render.rough', 'Roughness', 0, 1, .01, pc, 'render')}
       ${range('render.bump', 'Surface detail', 0, 1.5, .01, pc, 'render')}
+      `)}
+    `)}
+    ${sec('effects', 'Effects', `
+      ${grp('points', 'Point cloud', `
+      ${tog('fx.points.on', 'Point cloud', 'fx')}
+      ${range('fx.points.step', 'Dot spacing', 1, 6, 1, v => '×' + v, 'fx')}
+      ${range('fx.points.size', 'Dot size', .5, 8, .1, v => v.toFixed(1) + ' px', 'fx')}
+      ${range('fx.points.streak', 'Slope streaks', 0, 1.5, .01, pc, 'fx')}
+      ${range('fx.points.jitter', 'Jitter', 0, 1, .01, pc, 'fx')}
+      <div class="ml-col"><input type="color" data-hex="fx.points.low" value="${S.fx.points.low}"><input type="color" data-hex="fx.points.mid" value="${S.fx.points.mid}"><input type="color" data-hex="fx.points.high" value="${S.fx.points.high}"><span class="ml-note">Low · mid · high</span></div>
+      ${tog('fx.points.surface', 'Keep the surface under the dots', 'fx')}
+      `, true)}
+      ${grp('paint', 'Painterly', `
+      ${tog('fx.paint.on', 'Painterly posterize', 'fx')}
+      ${seg('fx.paint.ramp', [['vivid', 'Vivid'], ['dusk', 'Dusk'], ['earth', 'Earth']], 'fx', 'Colour map')}
+      ${range('fx.paint.bands', 'Bands', 3, 14, 1, v => v, 'fx')}
+      ${range('fx.paint.sat', 'Saturation', 0, 1.6, .01, pc, 'fx')}
+      ${range('fx.paint.stroke', 'Stroke size', 1, 20, .1, v => v.toFixed(1) + ' m', 'fx')}
+      ${range('fx.paint.strokeAmt', 'Stroke strength', 0, 1.5, .01, pc, 'fx')}
+      ${range('fx.paint.breakup', 'Edge break-up', 0, 1, .01, pc, 'fx')}
+      `)}
+      ${grp('relief', 'Shaded relief', `
+      ${tog('fx.relief.on', 'Shaded relief', 'fx')}
+      ${range('fx.relief.shade', 'Hillshade', 0, 1, .01, pc, 'fx')}
+      ${range('fx.relief.az', 'Light angle', 0, 1, .005, v => Math.round(v * 360) + '°', 'fx')}
+      ${range('fx.relief.haze', 'Haze', 0, 1, .01, pc, 'fx')}
+      ${range('fx.relief.lines', 'Contour lines', 0, 1, .01, pc, 'fx')}
+      ${tog('fx.relief.paper', 'Paper background', 'fx')}
+      ${tog('fx.relief.spot', 'Spotlight a region', 'fx')}
+      ${range('fx.relief.cx', 'Region across', -.5, .5, .005, f2, 'fx')}
+      ${range('fx.relief.cz', 'Region along', -.5, .5, .005, f2, 'fx')}
+      ${range('fx.relief.radius', 'Region size', .04, .75, .005, pc, 'fx')}
+      ${range('fx.relief.fade', 'Fade outside', 0, 1, .01, pc, 'fx')}
+      ${tog('fx.relief.border', 'Print border and title', 'fx')}
+      <input class="ml-in" id="relief-title" value="${S.fx.relief.title}" placeholder="Title" aria-label="Title">
+      `)}
     `)}
     ${sec('light', 'Light & air', `
       ${range('light.tod', 'Time of day', 0, 1, .005, v => todAt(v).name, 'light')}
@@ -931,7 +1139,7 @@ function buildPanel() {
       <p class="ml-lab">Camera move</p>
       <div class="ml-btns">${[['static', 'Static'], ['orbit', 'Orbit'], ['dolly', 'Dolly in'], ['fly', 'Fly-around'], ['pan', 'Side pan'], ['summit', 'Summit view'], ['zoom', 'Far to summit'], ['sweep', 'Profile sweep']]
         .map(([k, l]) => `<button type="button" class="ml-btn${S.anim.camera === k ? ' on' : ''}" data-cam="${k}">${l}</button>`).join('')}</div>
-      <p class="ml-note">A move writes keys into the timeline below — drag them, re-ease them, add your own.</p>
+      <p class="ml-note">A move writes keys into the timeline (Timeline button, top right, or T) — drag them, re-ease them, add your own.</p>
       ${seg('anim.lines', [['none', 'Still'], ['draw', 'Draw in'], ['scan', 'Scanline'], ['crawl', 'Crawl'], ['pulse', 'Pulse'], ['flicker', 'Flicker']], 'anim', 'The lines')}
       ${seg('anim.dir', [['up', 'Bottom-up'], ['down', 'Top-down'], ['lateral', 'Lateral']], 'anim', 'Direction')}
       ${range('anim.speed', 'Speed', .25, 6, .25, v => v + (S.anim.loop ? ' cycles' : '×'), 'anim')}
@@ -993,6 +1201,7 @@ const ON = {
   view: () => applyView(),
   render: () => applyRender(),
   light: () => applyRender(),
+  fx: () => applyRender(),
   anim: () => { syncUI(); drawTrack(); },
   react: () => { if (S.react.source !== 'audio' && audioEl) audioEl.pause(); },
 };
@@ -1007,6 +1216,8 @@ function bindPanel() {
     }
     if (el.id === 'line-col') { S.render.custom = el.value; S.render.colour = 'custom'; applyRender(); syncUI(); }
     if (el.id === 'fog-col') { S.light.fogColour = el.value; S.light.fogAuto = false; applyLight(); syncUI(); }
+    if (el.dataset.hex) { set(el.dataset.hex, el.value); applyFx(); }
+    if (el.id === 'relief-title') { S.fx.relief.title = el.value; drawOverlay(); }
     if (el.id === 'react-data') S.react.data = el.value;
     if (el.id === 'pname') S.name = el.value || 'Untitled mountain';
   });
@@ -1123,14 +1334,19 @@ function buildTools() {
     <div class="ml-tg ml-fold"><button type="button" data-ui="panel"><svg viewBox="0 0 16 16"><path d="M2 4h12M2 8h12M2 12h12"/></svg>Panel</button></div>
     <div class="ml-tg" id="tool-row">${t.map(k => `<button type="button" data-tool="${k}" title="${TOOL_NAMES[k]} (${TOOL_KEYS[k]})"><svg viewBox="0 0 16 16">${TOOL_ICONS[k]}</svg>${TOOL_NAMES[k]}<kbd>${TOOL_KEYS[k]}</kbd></button>`).join('')}</div>
     <div class="ml-tg"><button type="button" data-ui="undo" title="Undo (⌘Z)"><svg viewBox="0 0 16 16"><path d="M5 3L2 6l3 3"/><path d="M2 6h8a4 4 0 010 8H7"/></svg>Undo</button><button type="button" data-ui="redo" title="Redo (⇧⌘Z)"><svg viewBox="0 0 16 16"><path d="M11 3l3 3-3 3"/><path d="M14 6H6a4 4 0 000 8h3"/></svg>Redo</button></div>
-    <div class="ml-spacer"></div>
-    <div class="ml-tg"><button type="button" data-ui="present" title="Presentation (P)"><svg viewBox="0 0 16 16"><path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3"/></svg>Present</button></div>`;
+`;
+  $('#corner').innerHTML = `
+    <div class="ml-tg"><button type="button" data-ui="timeline" title="Show / hide the timeline (T)"><svg viewBox="0 0 16 16"><path d="M2 11h12M4 9v4M8 9v4M12 9v4M2 4h7"/></svg>Timeline</button><button type="button" data-ui="present" title="Fullscreen (P)"><svg viewBox="0 0 16 16"><path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3"/></svg>Fullscreen</button></div>`;
+  $('#corner').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.ui === 'present') present(true);
+    if (b.dataset.ui === 'timeline') showTimeline(!document.body.classList.contains('timeline-on'));
+  });
   $('#tools').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.tool) setTool(b.dataset.tool);
     if (b.dataset.ui === 'undo') stepHistory(undo, redo);
     if (b.dataset.ui === 'redo') stepHistory(redo, undo);
-    if (b.dataset.ui === 'present') present(true);
     if (b.dataset.ui === 'panel') document.body.classList.toggle('panel-open');
   });
 }
@@ -1217,9 +1433,18 @@ function hud(force) {
 }
 let toastT = 0;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('in'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('in'), 2400); }
+function showTimeline(on) {
+  document.body.classList.toggle('timeline-on', on);
+  const b = document.querySelector('[data-ui=timeline]'); if (b) b.classList.toggle('lit', on);
+  drawTrack();
+}
 function present(on) {
   document.body.classList.toggle('present', on);
-  if (on) { setTool('nav'); toast('Presentation — move the pointer for controls, Esc to leave'); }
+  /* Fullscreen: the browser's fullscreen too, where it is allowed */
+  const fs = document.fullscreenElement;
+  if (on && !fs) document.documentElement.requestFullscreen?.().catch(() => {});
+  if (!on && fs) document.exitFullscreen?.().catch(() => {});
+  if (on) { setTool('nav'); toast('Fullscreen — move the pointer for controls, Esc to leave'); }
   /* nothing of the editor over the mountain while presenting */
   const g = gizmo.getHelper ? gizmo.getHelper() : gizmo;
   if (on) { g.visible = false; gizmo.enabled = false; } else applyView();
@@ -1228,6 +1453,8 @@ function present(on) {
 $('#present-bar').innerHTML = `<button type="button" data-p="play">Play / pause</button><button type="button" data-p="png">PNG</button><button type="button" data-p="exit">Exit</button>`;
 $('#present-bar').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.p === 'play') setPlaying(!playing); if (b.dataset.p === 'png') savePNG(); if (b.dataset.p === 'exit') present(false); });
+/* Esc in browser fullscreen never reaches keydown — leave presenting with it */
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && document.body.classList.contains('present')) present(false); });
 let hoverT = 0;
 addEventListener('pointermove', () => { if (!document.body.classList.contains('present')) return; document.body.classList.add('hovering'); clearTimeout(hoverT); hoverT = setTimeout(() => document.body.classList.remove('hovering'), 1600); });
 addEventListener('keydown', e => {
@@ -1240,6 +1467,7 @@ addEventListener('keydown', e => {
   if (k === '[') { S.brush.size = Math.max(2, S.brush.size / 1.15); syncUI(); U.uBrush.value.z = S.brush.size; }
   if (k === ']') { S.brush.size = Math.min(60, S.brush.size * 1.15); syncUI(); U.uBrush.value.z = S.brush.size; }
   if (k === ' ') { e.preventDefault(); setPlaying(!playing); }
+  if (k === 't') showTimeline(!document.body.classList.contains('timeline-on'));
   if (k === 'p') present(!document.body.classList.contains('present'));
   if (k === 'escape' && document.body.classList.contains('present')) present(false);
 });
